@@ -10,7 +10,22 @@ type Detection = {
   x1: number; y1: number; x2: number; y2: number;
   object_id: number | null;
 };
-const TRAIL_WINDOW = 10;
+const TRAIL_WINDOW = 20;
+
+const getColorForClass = (className: string): { stroke: string; fill: string } => {
+    switch (className.toLowerCase()) {
+        case 'referee':
+            return { stroke: '#FFD700', fill: 'rgba(255, 215, 0, 0.15)' }; // yellow
+        case 'player':
+            return { stroke: '#f87171', fill: 'rgba(248, 113, 113, 0.15)' }; // red
+        case 'goalkeeper':
+            return { stroke: '#00FFFF', fill: 'rgba(0, 255, 255, 0.15)' }; // cyan
+        case 'ball':
+            return { stroke: '#FFA500', fill: 'rgba(255, 165, 0, 0.15)' }; // orange
+        default:
+            return { stroke: '#60a5fa', fill: 'rgba(96, 165, 250, 0.15)' }; // default blue
+    }
+};
 
 export default function MatchPage() {
     const router = useRouter();
@@ -47,7 +62,7 @@ export default function MatchPage() {
 
         if (!detections || detections.length === 0) return;
 
-        const t = Math.floor(video.currentTime); // 1 fps frames
+        const t = Math.floor(video.currentTime*25); // 25 fps frames
         const wFactor = canvas.width / (video.videoWidth || canvas.width);
         const hFactor = canvas.height / (video.videoHeight || canvas.height);
 
@@ -66,9 +81,13 @@ export default function MatchPage() {
         Object.keys(byId).forEach(id => {
             const pts = byId[id];
             if (pts.length < 2) return;
+            // Find the detection for this object to get its class
+            const det = detections.find(d => d.object_id === Number(id));
+            if (!det) return;
+            const colors = getColorForClass(det.class_name);
             ctx.beginPath();
             ctx.lineWidth = 2;
-            ctx.strokeStyle = "#60a5fa"; // blue trails
+            ctx.strokeStyle = colors.stroke;
             ctx.moveTo(pts[0].x, pts[0].y);
             for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
             ctx.stroke();
@@ -83,16 +102,55 @@ export default function MatchPage() {
                 const w = (d.x2 - d.x1) * wFactor;
                 const h = (d.y2 - d.y1) * hFactor;
 
-                ctx.beginPath();
-                ctx.rect(x, y, w, h);
+                const colors = getColorForClass(d.class_name);
                 ctx.lineWidth = 2;
-                ctx.strokeStyle = "#f87171"; // red boxes
-                ctx.fillStyle = "rgba(248, 113, 113, 0.15)";
-                ctx.fillRect(x, y, w, h);
-                ctx.stroke();
+                
+                if (d.class_name.toLowerCase() === 'ball') {
+                    // Draw downward-pointing triangle
+                    const centerX = x + w/2;
+                    const topY = y;  // Top position
+                    const triangleSize = Math.min(w, h) * 0.8;  // Triangle size relative to box
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(centerX - triangleSize/2, topY); // top left
+                    ctx.lineTo(centerX + triangleSize/2, topY); // top right
+                    ctx.lineTo(centerX, topY + triangleSize);   // bottom point
+                    ctx.closePath();
+                    ctx.fillStyle = colors.fill;
+                    ctx.strokeStyle = colors.stroke;
+                    ctx.fill();
+                    ctx.stroke();
+                } else {
+                    // Draw ground ellipse (partial arc: -45° → 235°)
+                    const bottomY = y + h;  // Y coordinate of the bottom
+                    const centerX = x + w / 2;
+                    const ellipseHeight = h * 0.12;  // Height of ellipse is 10% of original height
+
+                    // convert degrees to radians
+                    const startRad = (-45 * Math.PI) / 180;
+                    const endRad = (235 * Math.PI) / 180;
+
+                    ctx.beginPath();
+                    ctx.ellipse(
+                      centerX,          // center x
+                      bottomY,          // center y (at the bottom)
+                      w * 0.7,          // radiusX (half the original width)
+                      ellipseHeight,    // radiusY (small height for perspective)
+                      0,                // rotation
+                      startRad,         // start angle (in radians)
+                      endRad,           // end angle (in radians)
+                      false             // draw clockwise
+                    );
+
+                    // stroke only (no fill) to get just the arc segment
+                    ctx.lineWidth = 2;
+                    ctx.strokeStyle = colors.stroke;
+                    ctx.stroke();
+                }
 
                 const idText = d.object_id !== null ? `#${d.object_id}` : "";
-                const text = `${d.class_name} ${idText}`.trim();
+                const confPercent = Math.round(d.conf * 100);
+                const text = `${d.class_name} (${confPercent}%) ${idText}`.trim();
                 ctx.font = "12px sans-serif";
                 ctx.fillStyle = "#111827";
                 ctx.fillText(text, x + 2, y - 4 < 10 ? y + 12 : y - 4);
