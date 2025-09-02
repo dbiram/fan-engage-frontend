@@ -10,6 +10,12 @@ type Detection = {
   x1: number; y1: number; x2: number; y2: number;
   object_id: number | null;
 };
+type Track = { match_id:number; object_id:number; n_samples:number; team_id:number };
+
+const TEAM_COLORS: Record<number, { stroke: string; fill: string }> = {
+  1: { stroke: "rgba(220,38,38,0.9)",  fill: "rgba(220,38,38,0.15)" }, // red-600
+  2: { stroke: "rgba(37,99,235,0.9)",  fill: "rgba(37,99,235,0.15)" }, // blue-600
+};
 const TRAIL_WINDOW = 20;
 
 const getColorForClass = (className: string): { stroke: string; fill: string } => {
@@ -27,6 +33,17 @@ const getColorForClass = (className: string): { stroke: string; fill: string } =
     }
 };
 
+async function fetchTracks(matchId: number) {
+  const r = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/matches/${matchId}/tracks`);
+  if (!r.ok) return [] as Track[];
+  return (await r.json()) as Track[];
+}
+
+async function assignTeams(matchId: number) {
+  const r = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/teams/assign?match_id=${matchId}`, { method: "POST" });
+  return r.ok;
+}
+
 export default function MatchPage() {
     const router = useRouter();
     const { id } = router.query;
@@ -35,6 +52,8 @@ export default function MatchPage() {
     const [loadingDetections, setLoadingDetections] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const [tracksMap, setTracksMap] = useState<Record<number, number>>({});
+    const [loadingAssign, setLoadingAssign] = useState(false);
 
     useEffect(() => {
         if (!id) return;
@@ -48,6 +67,14 @@ export default function MatchPage() {
             })
             .catch(console.error);
     }, [id]);
+
+    const getStyledColors = (d: Detection): { stroke: string; fill: string } => {
+      if (d.class_name.toLowerCase() === "player" && d.object_id !== null) {
+        const teamId = tracksMap[d.object_id];
+        if (teamId && TEAM_COLORS[teamId]) return TEAM_COLORS[teamId];
+      }
+      return getColorForClass(d.class_name);
+    };
 
     const drawBoxes = () => {
         const video = videoRef.current;
@@ -84,7 +111,7 @@ export default function MatchPage() {
             // Find the detection for this object to get its class
             const det = detections.find(d => d.object_id === Number(id));
             if (!det) return;
-            const colors = getColorForClass(det.class_name);
+            const colors = det ? getStyledColors(det) : { stroke: "#60a5fa", fill: "rgba(96, 165, 250, 0.15)" };
             ctx.beginPath();
             ctx.lineWidth = 2;
             ctx.strokeStyle = colors.stroke;
@@ -102,7 +129,7 @@ export default function MatchPage() {
                 const w = (d.x2 - d.x1) * wFactor;
                 const h = (d.y2 - d.y1) * hFactor;
 
-                const colors = getColorForClass(d.class_name);
+                const colors = getStyledColors(d);
                 ctx.lineWidth = 2;
                 
                 if (d.class_name.toLowerCase() === 'ball') {
@@ -150,7 +177,7 @@ export default function MatchPage() {
 
                 const idText = d.object_id !== null ? `#${d.object_id}` : "";
                 const confPercent = Math.round(d.conf * 100);
-                const text = `${d.class_name} (${confPercent}%) ${idText}`.trim();
+                const text = `${idText}`.trim();
                 ctx.font = "12px sans-serif";
                 ctx.fillStyle = "#111827";
                 ctx.fillText(text, x + 2, y - 4 < 10 ? y + 12 : y - 4);
@@ -206,6 +233,39 @@ export default function MatchPage() {
             Loaded {detections.length} detections. Scrub the video to see boxes.
           </p>
         )}
+        <button
+          onClick={async () => {
+            if (!id) return;
+            try {
+              setLoadingAssign(true);
+              const ok = await assignTeams(Number(id));
+              if (ok) {
+                const rows = await fetchTracks(Number(id));
+                const map: Record<number, number> = {};
+                rows.forEach(t => { map[t.object_id] = t.team_id; });
+                setTracksMap(map);
+                // redraw with new colors
+                drawBoxes();
+              }
+            } finally {
+              setLoadingAssign(false);
+            }
+          }}
+          disabled={loadingAssign}
+          style={{ marginLeft: 12, padding: "8px 16px", cursor: "pointer" }}
+        >
+          {loadingAssign ? "Assigning…" : "Assign Teams"}
+        </button>
+        <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 12 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <i style={{ width: 12, height: 12, background: TEAM_COLORS[1].stroke, display: "inline-block", borderRadius: 2 }} />
+            Team 1
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <i style={{ width: 12, height: 12, background: TEAM_COLORS[2].stroke, display: "inline-block", borderRadius: 2 }} />
+            Team 2
+          </span>
+        </div>
       </div>
     </main>
   );
