@@ -17,6 +17,8 @@ const TEAM_COLORS: Record<number, { stroke: string; fill: string }> = {
   2: { stroke: "rgba(37,99,235,0.9)",  fill: "rgba(37,99,235,0.15)" }, // blue-600
 };
 const TRAIL_WINDOW = 20;
+const PITCH_M = 105;
+const PITCH_N = 68;
 
 const getColorForClass = (className: string): { stroke: string; fill: string } => {
     switch (className.toLowerCase()) {
@@ -44,6 +46,36 @@ async function assignTeams(matchId: number) {
   return r.ok;
 }
 
+const invert3x3 = (H: number[][]): number[][] | null => {
+  const a=H[0][0], b=H[0][1], c=H[0][2];
+  const d=H[1][0], e=H[1][1], f=H[1][2];
+  const g=H[2][0], h=H[2][1], i=H[2][2];
+  const A =   e*i - f*h, B = -(d*i - f*g), C =   d*h - e*g;
+  const D = -(b*i - c*h), E =   a*i - c*g, F = -(a*h - b*g);
+  const G =   b*f - c*e, H2 = -(a*f - c*D?e:a*f - c*e), I =   a*e - b*d; // we'll recompute H2 properly below
+  // fix minor typo and compute properly:
+  const G2 =  b*f - c*e;
+  const H3 = -(a*f - c*d);
+  const I2 =  a*e - b*d;
+  const det = a*A + b*B + c*C;
+  if (!isFinite(det) || Math.abs(det) < 1e-12) return null;
+  const inv = [
+    [A/det, D/det, G2/det],
+    [B/det, E/det, H3/det],
+    [C/det, F/det, I2/det],
+  ];
+  return inv;
+};
+
+const projectPitchToImage = (Hinv: number[][], X: number, Y: number) => {
+  // multiply [X,Y,1]^T by Hinv
+  const x = Hinv[0][0]*X + Hinv[0][1]*Y + Hinv[0][2]*1;
+  const y = Hinv[1][0]*X + Hinv[1][1]*Y + Hinv[1][2]*1;
+  const w = Hinv[2][0]*X + Hinv[2][1]*Y + Hinv[2][2]*1;
+  if (!isFinite(w) || Math.abs(w) < 1e-9) return null;
+  return { x: x / w, y: y / w }; // image pixel coords
+};
+
 export default function MatchPage() {
     const router = useRouter();
     const { id } = router.query;
@@ -54,6 +86,8 @@ export default function MatchPage() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [tracksMap, setTracksMap] = useState<Record<number, number>>({});
     const [loadingAssign, setLoadingAssign] = useState(false);
+    const [homography, setHomography] = useState<any[]>([]);
+    const [showPitch, setShowPitch] = useState(false);
 
     useEffect(() => {
         if (!id) return;
@@ -76,22 +110,158 @@ export default function MatchPage() {
       return getColorForClass(d.class_name);
     };
 
+    async function loadHomography() {
+      const r = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/matches/${Number(id)}/homography`);
+      if (r.ok) setHomography(await r.json());
+    }
+    console.log(homography);
+    const drawPitchOverlay = (
+                                ctx: CanvasRenderingContext2D,
+                                H: number[][],
+                                wFactor: number,
+                                hFactor: number
+                              ) => {
+      const Hinv = invert3x3(H);
+      if (!Hinv) return;
+
+      // helper to draw a line in pitch coords by sampling points
+      const drawPitchLine = (p1: [number, number], p2: [number, number], stroke = "rgba(6, 153, 163, 0.9)") => {
+        const STEPS = 64;
+        const pts: {x:number;y:number}[] = [];
+        for (let s = 0; s <= STEPS; s++) {
+          const t = s / STEPS;
+          const X = p1[0] + (p2[0] - p1[0]) * t;
+          const Y = p1[1] + (p2[1] - p1[1]) * t;
+          const p = projectPitchToImage(Hinv, X, Y);
+          if (p) pts.push({ x: p.x*wFactor, y: p.y*hFactor });
+        }
+        if (pts.length < 2) return;
+        ctx.beginPath();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = stroke;
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k].x, pts[k].y);
+        ctx.stroke();
+      };
+
+      // sidelines (y=0, y=N) and goal lines (x=0, x=M)
+      drawPitchLine([0,0], [PITCH_M,0]);             // top sideline
+      drawPitchLine([0,PITCH_N], [PITCH_M,PITCH_N]); // bottom sideline
+      drawPitchLine([0,0], [0,PITCH_N]);             // left goal line
+      drawPitchLine([PITCH_M,0], [PITCH_M,PITCH_N]); // right goal line
+
+      // midline x = M/2
+      drawPitchLine([PITCH_M/2, 0], [PITCH_M/2, PITCH_N], "rgba(59,130,246,0.9)");
+
+      // optional: six-yard boxes (very rough; adjust to your canonical map)
+      const sixX = 5.5;
+      drawPitchLine([sixX, PITCH_N*0.25], [sixX, PITCH_N*0.75], "rgba(16,185,129,0.6)");
+      drawPitchLine([PITCH_M-sixX, PITCH_N*0.25], [PITCH_M-sixX, PITCH_N*0.75], "rgba(16,185,129,0.6)");
+    };
+
     const drawBoxes = () => {
         const video = videoRef.current;
         const canvas = canvasRef.current;
         if (!video || !canvas) return;
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
-
+        
+        console.log("draw function triggered");
         canvas.width = video.clientWidth;
         canvas.height = video.clientHeight;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        if (!detections || detections.length === 0) return;
+        //if (!detections || detections.length === 0) return;
 
         const t = Math.floor(video.currentTime*25); // 25 fps frames
         const wFactor = canvas.width / (video.videoWidth || canvas.width);
         const hFactor = canvas.height / (video.videoHeight || canvas.height);
+        console.log("draw function triggered without detections");
+        // === pitch overlay (before boxes), if enabled ===
+        if (showPitch && Array.isArray(homography) && homography.length > 0) {
+          let seg = homography.find((s: any) => t >= s.frame_start && t <= s.frame_end);
+          console.log("Drawing pitch overlay");
+          if (showPitch && seg?.keypoints_img?.length) {
+            ctx.save();
+            // Draw dots and labels
+            ctx.fillStyle = "rgba(182, 16, 185, 0.9)";
+            ctx.strokeStyle = "rgba(182, 16, 185, 0.9)";
+            ctx.lineWidth = 4;
+            ctx.font = "12px sans-serif";
+
+            // Create a map of keypoints for easy access
+            const keypoints = new Map<string, {x: number, y: number}>(seg.keypoints_img.map(kp => [kp.name, { 
+              x: kp.x * wFactor, 
+              y: kp.y * hFactor 
+            }]));
+
+            // Draw dots and labels first
+            for (const kp of seg.keypoints_img) {
+              const x = kp.x * wFactor;
+              const y = kp.y * hFactor;
+              ctx.beginPath();
+              ctx.arc(x, y, 3, 0, Math.PI*2);
+              ctx.fill();
+              //ctx.fillText(kp.name, x + 6, y - 6);
+            }
+
+            // Define the connections to draw
+            const connections = [
+              ["corner_top_left", "left_penalty_box_top_left"],
+              ["left_penalty_box_top_left", "left_six_box_top_left"],
+              ["left_six_box_top_left", "left_six_box_bottom_left"],
+              ["left_six_box_bottom_left", "left_penalty_box_bottom_left"],
+              ["left_penalty_box_bottom_left", "corner_bottom_left"],
+              ["left_penalty_box_top_left", "left_penalty_box_top_right"],
+              ["left_six_box_top_left", "left_six_box_top_right"],
+              ["left_six_box_bottom_left", "left_six_box_bottom_right"],
+              ["left_penalty_box_bottom_left", "left_penalty_box_bottom_right"],
+              ["left_six_box_top_right", "left_six_box_bottom_right"],
+              ["left_penalty_box_top_right", "left_penalty_box_center_top"],
+              ["left_penalty_box_center_top", "left_penalty_box_center_bottom"],
+              ["left_penalty_box_center_bottom", "left_penalty_box_bottom_right"],
+              ["center_top", "center_circle_top"],
+              ["center_circle_top", "center_circle_bottom"],
+              ["center_circle_bottom", "center_bottom"],
+              ["corner_top_left", "center_top"],
+              ["corner_bottom_left", "center_bottom"],
+              ["center_top", "corner_top_right"],
+              ["center_bottom", "corner_bottom_right"],
+              
+              ["corner_top_right", "right_penalty_box_top_right"],
+              ["right_penalty_box_top_right", "right_six_box_top_right"],
+              ["right_six_box_top_right", "right_six_box_bottom_right"],
+              ["right_six_box_bottom_right", "right_penalty_box_bottom_right"],
+              ["right_penalty_box_bottom_right", "corner_bottom_right"],
+              ["right_penalty_box_top_right", "right_penalty_box_top_left"],
+              ["right_six_box_top_right", "right_six_box_top_left"],
+              ["right_six_box_bottom_right", "right_six_box_bottom_left"],
+              ["right_penalty_box_bottom_right", "right_penalty_box_bottom_left"],
+              ["right_six_box_top_left", "right_six_box_bottom_left"],
+              ["right_penalty_box_top_left", "right_penalty_box_center_top"],
+              ["right_penalty_box_center_top", "right_penalty_box_center_bottom"],
+              ["right_penalty_box_center_bottom", "right_penalty_box_bottom_left"],
+            ];
+
+            // Draw the connections
+            ctx.strokeStyle = "rgba(59,130,246,0.9)"; // blue color
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (const [start, end] of connections) {
+              const startPoint = keypoints.get(start);
+              const endPoint = keypoints.get(end);
+              if (startPoint && endPoint) {
+                ctx.moveTo(startPoint.x, startPoint.y);
+                ctx.lineTo(endPoint.x, endPoint.y);
+              }
+            }
+            ctx.stroke();
+            
+            ctx.restore();
+          }
+        }
+
+        if (!detections || detections.length === 0) return;
 
         // --- draw trails (look back a small window) ---
         const byId: Record<string, { x: number; y: number; frame: number }[]> = {};
@@ -266,6 +436,10 @@ export default function MatchPage() {
             Team 2
           </span>
         </div>
+        <label style={{ marginLeft: 12 }}>
+          <input type="checkbox" checked={showPitch} onChange={(e)=>{setShowPitch(e.target.checked); drawBoxes();}} /> Show Pitch Lines
+        </label>
+        <button style={{ marginLeft: 8 }} onClick={loadHomography}>Load Homography</button>
       </div>
     </main>
   );
