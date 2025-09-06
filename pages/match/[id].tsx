@@ -17,8 +17,44 @@ const TEAM_COLORS: Record<number, { stroke: string; fill: string }> = {
   2: { stroke: "rgba(37,99,235,0.9)",  fill: "rgba(37,99,235,0.15)" }, // blue-600
 };
 const TRAIL_WINDOW = 20;
-const PITCH_M = 105;
-const PITCH_N = 68;
+const PITCH_M = 120;
+const PITCH_N = 70;
+
+// Canonical 2D pitch coordinates in meters
+const CANONICAL_PITCH_POINTS = {
+  corner_top_left: [0.0, 0.0],
+  left_penalty_box_top_left: [0.0, PITCH_N*0.21],
+  left_six_box_top_left: [0.0, PITCH_N*0.35],
+  left_six_box_bottom_left: [0.0, PITCH_N*0.65],
+  left_penalty_box_bottom_left: [0.0, PITCH_N*0.79],
+  corner_bottom_left: [0.0, PITCH_N],
+  left_six_box_top_right: [5.5, PITCH_N*0.35],
+  left_six_box_bottom_right: [5.5, PITCH_N*0.65],
+  left_penalty_spot: [11.0, PITCH_N/2.0],
+  left_penalty_box_top_right: [20, PITCH_N*0.21],
+  left_penalty_box_center_top: [20, PITCH_N*0.35],
+  left_penalty_box_center_bottom: [20, PITCH_N*0.65],
+  left_penalty_box_bottom_right: [20, PITCH_N*0.79],
+  center_top: [PITCH_M/2.0, 0.0],
+  center_circle_top: [PITCH_M/2.0, PITCH_N*0.4],
+  center_circle_bottom: [PITCH_M/2.0, PITCH_N*0.6],
+  center_bottom: [PITCH_M/2.0, PITCH_N],
+  right_penalty_box_top_left: [PITCH_M-20, PITCH_N*0.21],
+  right_penalty_box_center_top: [PITCH_M-20, PITCH_N*0.35],
+  right_penalty_box_center_bottom: [PITCH_M-20, PITCH_N*0.65],
+  right_penalty_box_bottom_left: [PITCH_M-20, PITCH_N*0.79],
+  right_penalty_spot: [PITCH_M-11.0, PITCH_N/2.0],
+  right_six_box_top_left: [PITCH_M-5.5, PITCH_N*0.35],
+  right_six_box_bottom_left: [PITCH_M-5.5, PITCH_N*0.65],
+  corner_top_right: [PITCH_M, 0.0],
+  right_penalty_box_top_right: [PITCH_M, PITCH_N*0.21],
+  right_six_box_top_right: [PITCH_M, PITCH_N*0.35],
+  right_six_box_bottom_right: [PITCH_M, PITCH_N*0.65],
+  right_penalty_box_bottom_right: [PITCH_M, PITCH_N*0.79],
+  corner_bottom_right: [PITCH_M, PITCH_N],
+  center_circle_left: [PITCH_M/2.0 - PITCH_N*0.1, PITCH_N/2.0],
+  center_circle_right: [PITCH_M/2.0 + PITCH_N*0.1, PITCH_N/2.0]
+} as const;
 
 const getColorForClass = (className: string): { stroke: string; fill: string } => {
     switch (className.toLowerCase()) {
@@ -46,25 +82,36 @@ async function assignTeams(matchId: number) {
   return r.ok;
 }
 
-const invert3x3 = (H: number[][]): number[][] | null => {
-  const a=H[0][0], b=H[0][1], c=H[0][2];
-  const d=H[1][0], e=H[1][1], f=H[1][2];
-  const g=H[2][0], h=H[2][1], i=H[2][2];
-  const A =   e*i - f*h, B = -(d*i - f*g), C =   d*h - e*g;
-  const D = -(b*i - c*h), E =   a*i - c*g, F = -(a*h - b*g);
-  const G =   b*f - c*e, H2 = -(a*f - c*D?e:a*f - c*e), I =   a*e - b*d; // we'll recompute H2 properly below
-  // fix minor typo and compute properly:
-  const G2 =  b*f - c*e;
-  const H3 = -(a*f - c*d);
-  const I2 =  a*e - b*d;
-  const det = a*A + b*B + c*C;
+const invert3x3 = (m: number[][]): number[][] | null => {
+  const det =
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+    m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+    m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+
   if (!isFinite(det) || Math.abs(det) < 1e-12) return null;
-  const inv = [
-    [A/det, D/det, G2/det],
-    [B/det, E/det, H3/det],
-    [C/det, F/det, I2/det],
+  const invDet = 1 / det;
+
+  // Adjugate matrix (cofactor matrix transposed)
+  const adj = [
+    [
+      (m[1][1] * m[2][2] - m[1][2] * m[2][1]),
+      -(m[0][1] * m[2][2] - m[0][2] * m[2][1]),
+      (m[0][1] * m[1][2] - m[0][2] * m[1][1])
+    ],
+    [
+      -(m[1][0] * m[2][2] - m[1][2] * m[2][0]),
+      (m[0][0] * m[2][2] - m[0][2] * m[2][0]),
+      -(m[0][0] * m[1][2] - m[0][2] * m[1][0])
+    ],
+    [
+      (m[1][0] * m[2][1] - m[1][1] * m[2][0]),
+      -(m[0][0] * m[2][1] - m[0][1] * m[2][0]),
+      (m[0][0] * m[1][1] - m[0][1] * m[1][0])
+    ]
   ];
-  return inv;
+
+  // Multiply adjugate by 1/det
+  return adj.map(row => row.map(val => val * invDet));
 };
 
 const projectPitchToImage = (Hinv: number[][], X: number, Y: number) => {
@@ -115,49 +162,6 @@ export default function MatchPage() {
       if (r.ok) setHomography(await r.json());
     }
     console.log(homography);
-    const drawPitchOverlay = (
-                                ctx: CanvasRenderingContext2D,
-                                H: number[][],
-                                wFactor: number,
-                                hFactor: number
-                              ) => {
-      const Hinv = invert3x3(H);
-      if (!Hinv) return;
-
-      // helper to draw a line in pitch coords by sampling points
-      const drawPitchLine = (p1: [number, number], p2: [number, number], stroke = "rgba(6, 153, 163, 0.9)") => {
-        const STEPS = 64;
-        const pts: {x:number;y:number}[] = [];
-        for (let s = 0; s <= STEPS; s++) {
-          const t = s / STEPS;
-          const X = p1[0] + (p2[0] - p1[0]) * t;
-          const Y = p1[1] + (p2[1] - p1[1]) * t;
-          const p = projectPitchToImage(Hinv, X, Y);
-          if (p) pts.push({ x: p.x*wFactor, y: p.y*hFactor });
-        }
-        if (pts.length < 2) return;
-        ctx.beginPath();
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = stroke;
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k].x, pts[k].y);
-        ctx.stroke();
-      };
-
-      // sidelines (y=0, y=N) and goal lines (x=0, x=M)
-      drawPitchLine([0,0], [PITCH_M,0]);             // top sideline
-      drawPitchLine([0,PITCH_N], [PITCH_M,PITCH_N]); // bottom sideline
-      drawPitchLine([0,0], [0,PITCH_N]);             // left goal line
-      drawPitchLine([PITCH_M,0], [PITCH_M,PITCH_N]); // right goal line
-
-      // midline x = M/2
-      drawPitchLine([PITCH_M/2, 0], [PITCH_M/2, PITCH_N], "rgba(59,130,246,0.9)");
-
-      // optional: six-yard boxes (very rough; adjust to your canonical map)
-      const sixX = 5.5;
-      drawPitchLine([sixX, PITCH_N*0.25], [sixX, PITCH_N*0.75], "rgba(16,185,129,0.6)");
-      drawPitchLine([PITCH_M-sixX, PITCH_N*0.25], [PITCH_M-sixX, PITCH_N*0.75], "rgba(16,185,129,0.6)");
-    };
 
     const drawBoxes = () => {
         const video = videoRef.current;
@@ -181,7 +185,7 @@ export default function MatchPage() {
         if (showPitch && Array.isArray(homography) && homography.length > 0) {
           let seg = homography.find((s: any) => t >= s.frame_start && t <= s.frame_end);
           console.log("Drawing pitch overlay");
-          if (showPitch && seg?.keypoints_img?.length) {
+          if (showPitch && seg?.H?.length) {
             ctx.save();
             // Draw dots and labels
             ctx.fillStyle = "rgba(182, 16, 185, 0.9)";
@@ -189,11 +193,20 @@ export default function MatchPage() {
             ctx.lineWidth = 4;
             ctx.font = "12px sans-serif";
 
-            // Create a map of keypoints for easy access
-            const keypoints = new Map<string, {x: number, y: number}>(seg.keypoints_img.map(kp => [kp.name, { 
-              x: kp.x * wFactor, 
-              y: kp.y * hFactor 
-            }]));
+            // Project all points using homography
+            const keypoints = new Map<string, {x: number, y: number}>();
+            for (const [name, [X, Y]] of Object.entries(CANONICAL_PITCH_POINTS)) {
+              const Hinv = invert3x3(seg.H);
+              if (Hinv) {
+                const projected = projectPitchToImage(Hinv, X, Y);
+                if (projected) {
+                  keypoints.set(name, {
+                    x: projected.x * wFactor,
+                    y: projected.y * hFactor
+                  });
+                }
+              }
+            }
 
             // Draw dots and labels first
             for (const kp of seg.keypoints_img) {
@@ -243,8 +256,17 @@ export default function MatchPage() {
               ["right_penalty_box_center_bottom", "right_penalty_box_bottom_left"],
             ];
 
+            // Draw the points
+            ctx.fillStyle = "rgba(61, 120, 105, 0.9)"; // blue color
+            for (const [name, point] of keypoints.entries()) {
+              ctx.beginPath();
+              ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+              ctx.fill();
+              // ctx.fillText(name, point.x + 6, point.y - 6);
+            }
+
             // Draw the connections
-            ctx.strokeStyle = "rgba(59,130,246,0.9)"; // blue color
+            ctx.strokeStyle = "rgba(129, 251, 220, 0.9)"; // blue color
             ctx.lineWidth = 2;
             ctx.beginPath();
             for (const [start, end] of connections) {
