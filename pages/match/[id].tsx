@@ -131,10 +131,132 @@ export default function MatchPage() {
     const [loadingDetections, setLoadingDetections] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const radarRef = useRef<HTMLCanvasElement>(null);
     const [tracksMap, setTracksMap] = useState<Record<number, number>>({});
     const [loadingAssign, setLoadingAssign] = useState(false);
     const [homography, setHomography] = useState<any[]>([]);
     const [showPitch, setShowPitch] = useState(false);
+
+    const drawRadar = (t: number, seg: any) => {
+      const canvas = radarRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      // Set canvas size to match display size
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
+      
+      // Clear canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Calculate scale factors to fit pitch in canvas
+      const scaleX = canvas.width / PITCH_M;
+      const scaleY = canvas.height / PITCH_N;
+      const scale = Math.min(scaleX, scaleY);
+
+      // Center the pitch in the canvas
+      const offsetX = (canvas.width - PITCH_M * scale) / 2;
+      const offsetY = (canvas.height - PITCH_N * scale) / 2;
+
+      // Draw pitch lines in white
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+
+      // Draw the connections between pitch points
+      const connections = [
+        ["corner_top_left", "left_penalty_box_top_left"],
+        ["left_penalty_box_top_left", "left_six_box_top_left"],
+        ["left_six_box_top_left", "left_six_box_bottom_left"],
+        ["left_six_box_bottom_left", "left_penalty_box_bottom_left"],
+        ["left_penalty_box_bottom_left", "corner_bottom_left"],
+        ["left_penalty_box_top_left", "left_penalty_box_top_right"],
+        ["left_six_box_top_left", "left_six_box_top_right"],
+        ["left_six_box_bottom_left", "left_six_box_bottom_right"],
+        ["left_penalty_box_bottom_left", "left_penalty_box_bottom_right"],
+        ["left_six_box_top_right", "left_six_box_bottom_right"],
+        ["left_penalty_box_top_right", "left_penalty_box_center_top"],
+        ["left_penalty_box_center_top", "left_penalty_box_center_bottom"],
+        ["left_penalty_box_center_bottom", "left_penalty_box_bottom_right"],
+        ["center_top", "center_circle_top"],
+        ["center_circle_top", "center_circle_bottom"],
+        ["center_circle_bottom", "center_bottom"],
+        ["corner_top_left", "center_top"],
+        ["corner_bottom_left", "center_bottom"],
+        ["center_top", "corner_top_right"],
+        ["center_bottom", "corner_bottom_right"],
+        ["corner_top_right", "right_penalty_box_top_right"],
+        ["right_penalty_box_top_right", "right_six_box_top_right"],
+        ["right_six_box_top_right", "right_six_box_bottom_right"],
+        ["right_six_box_bottom_right", "right_penalty_box_bottom_right"],
+        ["right_penalty_box_bottom_right", "corner_bottom_right"],
+        ["right_penalty_box_top_right", "right_penalty_box_top_left"],
+        ["right_six_box_top_right", "right_six_box_top_left"],
+        ["right_six_box_bottom_right", "right_six_box_bottom_left"],
+        ["right_penalty_box_bottom_right", "right_penalty_box_bottom_left"],
+        ["right_six_box_top_left", "right_six_box_bottom_left"],
+        ["right_penalty_box_top_left", "right_penalty_box_center_top"],
+        ["right_penalty_box_center_top", "right_penalty_box_center_bottom"],
+        ["right_penalty_box_center_bottom", "right_penalty_box_bottom_left"]
+      ];
+
+      // Draw pitch outline and lines
+      for (const [start, end] of connections) {
+        const startPoint = CANONICAL_PITCH_POINTS[start];
+        const endPoint = CANONICAL_PITCH_POINTS[end];
+        ctx.moveTo(startPoint[0] * scale + offsetX, startPoint[1] * scale + offsetY);
+        ctx.lineTo(endPoint[0] * scale + offsetX, endPoint[1] * scale + offsetY);
+      }
+      ctx.stroke();
+
+      // If we have homography and detections, plot the players
+      if (seg?.H && detections) {
+        const H = seg.H;
+        const currentDetections = detections.filter(d => d.frame_id === t && d.class_name.toLowerCase() === "player");
+        
+        for (const d of currentDetections) {
+          // Get bottom center of detection box
+          const imageX = (d.x1 + d.x2) / 2;
+          const imageY = d.y2;
+
+          // Convert from image coordinates to pitch coordinates using H matrix
+          const w = H[2][0] * imageX + H[2][1] * imageY + H[2][2];
+          if (Math.abs(w) < 1e-10) continue;
+          
+          const pitchX = (H[0][0] * imageX + H[0][1] * imageY + H[0][2]) / w;
+          const pitchY = (H[1][0] * imageX + H[1][1] * imageY + H[1][2]) / w;
+
+          // Only draw if the point is within pitch bounds
+          if (pitchX >= 0 && pitchX <= PITCH_M && pitchY >= 0 && pitchY <= PITCH_N) {
+            // Draw player dot
+            ctx.beginPath();
+            ctx.arc(
+              pitchX * scale + offsetX,
+              pitchY * scale + offsetY,
+              12,
+              0,
+              Math.PI * 2
+            );
+
+            if (d.object_id !== null && tracksMap[d.object_id]) {
+              // Use team colors if available
+              const teamId = tracksMap[d.object_id];
+              const colors = TEAM_COLORS[teamId];
+              ctx.fillStyle = colors.fill;
+              ctx.strokeStyle = colors.stroke;
+            } else {
+              // Default color if no team assigned
+              ctx.fillStyle = "rgba(116, 32, 123, 0.7)";
+              ctx.strokeStyle = "rgba(41, 3, 48, 0.9)";
+            }
+
+            ctx.fill();
+            ctx.stroke();
+          }
+        }
+      }
+    };
 
     useEffect(() => {
         if (!id) return;
@@ -161,7 +283,6 @@ export default function MatchPage() {
       const r = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/matches/${Number(id)}/homography`);
       if (r.ok) setHomography(await r.json());
     }
-    console.log(homography);
 
     const drawBoxes = () => {
         const video = videoRef.current;
@@ -170,7 +291,6 @@ export default function MatchPage() {
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
         
-        console.log("draw function triggered");
         canvas.width = video.clientWidth;
         canvas.height = video.clientHeight;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -180,11 +300,19 @@ export default function MatchPage() {
         const t = Math.floor(video.currentTime*25); // 25 fps frames
         const wFactor = canvas.width / (video.videoWidth || canvas.width);
         const hFactor = canvas.height / (video.videoHeight || canvas.height);
-        console.log("draw function triggered without detections");
+
+        // Find current homography segment
+        let currentSeg = null;
+        if (Array.isArray(homography) && homography.length > 0) {
+          currentSeg = homography.find((s: any) => t >= s.frame_start && t <= s.frame_end);
+        }
+        
+        // Update radar view
+        drawRadar(t, currentSeg);
+
         // === pitch overlay (before boxes), if enabled ===
         if (showPitch && Array.isArray(homography) && homography.length > 0) {
           let seg = homography.find((s: any) => t >= s.frame_start && t <= s.frame_end);
-          console.log("Drawing pitch overlay");
           if (showPitch && seg?.H?.length) {
             ctx.save();
             // Draw dots and labels
@@ -381,7 +509,7 @@ export default function MatchPage() {
         if (!id) return;
         setLoadingDetections(true);
         try {
-            await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analyze/detections?match_id=${id}`);
+            //await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analyze/detections?match_id=${id}`);
             const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/matches/${id}/detections`);
             const data: Detection[] = await res.json();
             setDetections(data);
@@ -397,20 +525,35 @@ export default function MatchPage() {
   return (
     <main style={{padding:20}}>
       <h2>{match.title}</h2>
-      <div style={{ position: "relative", width: 960, maxWidth: "100%" }}>
-        <video
-          ref={videoRef}
-          controls
-          width={960}
-          src={match.video_url}
-          onTimeUpdate={drawBoxes}
-          onLoadedMetadata={drawBoxes}
-          style={{ width: "100%" }}
-        />
-        <canvas
-          ref={canvasRef}
-          style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }}
-        />
+      <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
+        <div style={{ position: "relative", width: 960, maxWidth: "100%" }}>
+          <video
+            ref={videoRef}
+            controls
+            width={960}
+            src={match.video_url}
+            onTimeUpdate={drawBoxes}
+            onLoadedMetadata={drawBoxes}
+            style={{ width: "100%" }}
+          />
+          <canvas
+            ref={canvasRef}
+            style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }}
+          />
+        </div>
+        <div style={{ 
+          width: "960px", 
+          aspectRatio: `${PITCH_M}/${PITCH_N}`,
+          backgroundColor: "#2e8b57", 
+          position: "relative",
+          border: "2px solid #1a512f",
+          maxWidth: "100%"
+        }}>
+          <canvas
+            ref={radarRef}
+            style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }}
+          />
+        </div>
       </div>
       <div style={{ marginTop: 20 }}>
         <button
@@ -430,7 +573,8 @@ export default function MatchPage() {
             if (!id) return;
             try {
               setLoadingAssign(true);
-              const ok = await assignTeams(Number(id));
+              //const ok = await assignTeams(Number(id));
+              const ok = true;
               if (ok) {
                 const rows = await fetchTracks(Number(id));
                 const map: Record<number, number> = {};
