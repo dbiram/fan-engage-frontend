@@ -13,8 +13,12 @@ type Detection = {
 type Track = { match_id:number; object_id:number; n_samples:number; team_id:number };
 
 const TEAM_COLORS: Record<number, { stroke: string; fill: string }> = {
-  1: { stroke: "rgba(220,38,38,0.9)",  fill: "rgba(220,38,38,0.15)" }, // red-600
-  2: { stroke: "rgba(37,99,235,0.9)",  fill: "rgba(37,99,235,0.15)" }, // blue-600
+  1: { stroke: "rgba(220,38,38,0.9)",  fill: "rgba(220, 38, 38, 0.65)" }, // red-600
+  2: { stroke: "rgba(37,99,235,0.9)",  fill: "rgba(37,99,235,0.65)" }, // blue-600
+};
+const TEAM_ZONES: Record<number, { fill: string }> = {
+  1: { fill: "rgba(255, 0, 0, 0.2)" }, // red-600
+  2: { fill: "rgba(37,99,235,0.2)" }, // blue-600
 };
 const TRAIL_WINDOW = 20;
 const PITCH_M = 120;
@@ -123,19 +127,66 @@ const projectPitchToImage = (Hinv: number[][], X: number, Y: number) => {
   return { x: x / w, y: y / w }; // image pixel coords
 };
 
+// Draw the Voronoi diagram for team zones
+const drawVoronoiZones = (
+  ctx: CanvasRenderingContext2D, 
+  points: Array<{ x: number, y: number, team: number }>,
+  width: number,
+  height: number,
+  pixelSize: number = 4 // Size of each pixel block for optimization
+) => {
+  // Create an offscreen canvas for the Voronoi computation
+  const offscreen = document.createElement('canvas');
+  offscreen.width = Math.ceil(width / pixelSize);
+  offscreen.height = Math.ceil(height / pixelSize);
+  const offCtx = offscreen.getContext('2d');
+  if (!offCtx) return;
+
+  // For each pixel block in the grid
+  for (let px = 0; px < offscreen.width; px++) {
+    for (let py = 0; py < offscreen.height; py++) {
+      const x = px * pixelSize;
+      const y = py * pixelSize;
+      
+      // Find the closest point
+      let minDist = Infinity;
+      let closestTeam: number | undefined = undefined;
+      
+      for (const point of points) {
+        const dx = point.x - x;
+        const dy = point.y - y;
+        const dist = dx * dx + dy * dy; // Square distance is enough for comparison
+        if (dist < minDist) {
+          minDist = dist;
+          closestTeam = point.team;
+        }
+      }
+      
+      // Color the pixel block according to the closest team
+      if (closestTeam !== undefined) {
+        offCtx.fillStyle = TEAM_ZONES[closestTeam].fill;
+        offCtx.fillRect(px, py, 1, 1);
+      }
+    }
+  }
+  
+  // Draw the resulting Voronoi diagram onto the main canvas
+  ctx.drawImage(offscreen, 0, 0, width, height);
+};
+
 export default function MatchPage() {
     const router = useRouter();
     const { id } = router.query;
     const [match, setMatch] = useState<Match | null>(null);
     const [detections, setDetections] = useState<Detection[]>([]);
-    const [loadingDetections, setLoadingDetections] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const radarRef = useRef<HTMLCanvasElement>(null);
     const [tracksMap, setTracksMap] = useState<Record<number, number>>({});
-    const [loadingAssign, setLoadingAssign] = useState(false);
     const [homography, setHomography] = useState<any[]>([]);
     const [showPitch, setShowPitch] = useState(false);
+    const [showDetections, setShowDetections] = useState(true);
+    const [showTeams, setShowTeams] = useState(true);
 
     const drawRadar = (t: number, seg: any) => {
       const canvas = radarRef.current;
@@ -210,11 +261,47 @@ export default function MatchPage() {
       }
       ctx.stroke();
 
-      // If we have homography and detections, plot the players
+      // If we have homography and detections, plot all objects except referees
       if (seg?.H && detections) {
         const H = seg.H;
-        const currentDetections = detections.filter(d => d.frame_id === t && d.class_name.toLowerCase() === "player");
+        const currentDetections = detections.filter(d => 
+          d.frame_id === t && 
+          d.class_name.toLowerCase() !== 'referee'
+        );
+
+        // First, collect all player positions for Voronoi diagram
+        const playerPositions: Array<{ x: number, y: number, team: number }> = [];
         
+        for (const d of currentDetections) {
+          if (d.class_name.toLowerCase() === 'player' && d.object_id !== null && tracksMap[d.object_id]) {
+            // Get bottom center of detection box
+            const imageX = (d.x1 + d.x2) / 2;
+            const imageY = d.y2;
+
+            // Convert from image coordinates to pitch coordinates
+            const w = H[2][0] * imageX + H[2][1] * imageY + H[2][2];
+            if (Math.abs(w) < 1e-10) continue;
+            
+            const pitchX = (H[0][0] * imageX + H[0][1] * imageY + H[0][2]) / w;
+            const pitchY = (H[1][0] * imageX + H[1][1] * imageY + H[1][2]) / w;
+
+            // Only include if within pitch bounds
+            if (pitchX >= 0 && pitchX <= PITCH_M && pitchY >= 0 && pitchY <= PITCH_N) {
+              playerPositions.push({
+                x: pitchX * scale + offsetX,
+                y: pitchY * scale + offsetY,
+                team: tracksMap[d.object_id]
+              });
+            }
+          }
+        }
+
+        // Draw Voronoi diagram if we have players from both teams
+        if (playerPositions.length > 0) {
+          drawVoronoiZones(ctx, playerPositions, canvas.width, canvas.height);
+        }
+
+        // Then draw all objects
         for (const d of currentDetections) {
           // Get bottom center of detection box
           const imageX = (d.x1 + d.x2) / 2;
@@ -229,26 +316,28 @@ export default function MatchPage() {
 
           // Only draw if the point is within pitch bounds
           if (pitchX >= 0 && pitchX <= PITCH_M && pitchY >= 0 && pitchY <= PITCH_N) {
-            // Draw player dot
+            // Draw dot
             ctx.beginPath();
             ctx.arc(
               pitchX * scale + offsetX,
               pitchY * scale + offsetY,
-              12,
+              d.class_name.toLowerCase() === 'ball' ? 4 : 12, // smaller radius for ball
               0,
               Math.PI * 2
             );
 
-            if (d.object_id !== null && tracksMap[d.object_id]) {
-              // Use team colors if available
+            // Set colors based on class_name and team assignment
+            if (d.class_name.toLowerCase() === 'player' && d.object_id !== null && tracksMap[d.object_id]) {
+              // Use team colors for players if team is assigned
               const teamId = tracksMap[d.object_id];
               const colors = TEAM_COLORS[teamId];
               ctx.fillStyle = colors.fill;
               ctx.strokeStyle = colors.stroke;
             } else {
-              // Default color if no team assigned
-              ctx.fillStyle = "rgba(116, 32, 123, 0.7)";
-              ctx.strokeStyle = "rgba(41, 3, 48, 0.9)";
+              // Use class-based colors for other objects
+              const colors = getColorForClass(d.class_name);
+              ctx.fillStyle = colors.fill;
+              ctx.strokeStyle = colors.stroke;
             }
 
             ctx.fill();
@@ -260,19 +349,46 @@ export default function MatchPage() {
 
     useEffect(() => {
         if (!id) return;
+        
+        // Fetch match details
         fetch(process.env.NEXT_PUBLIC_API_BASE + "/matches")
             .then(r => r.json())
             .then((rows: Match[]) => {
-            const m = rows.find(x => x.id === Number(id));
-            if (m) {
-                setMatch(m);
-            }
+                const m = rows.find(x => x.id === Number(id));
+                if (m) {
+                    setMatch(m);
+                }
+            })
+            .catch(console.error);
+
+        // Fetch detections
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/matches/${id}/detections`)
+            .then(r => r.json())
+            .then((data: Detection[]) => {
+                setDetections(data);
+            })
+            .catch(console.error);
+
+        // Fetch team assignments
+        fetchTracks(Number(id))
+            .then(rows => {
+                const map: Record<number, number> = {};
+                rows.forEach(t => { map[t.object_id] = t.team_id; });
+                setTracksMap(map);
+            })
+            .catch(console.error);
+
+        // Fetch homography
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/matches/${Number(id)}/homography`)
+            .then(r => r.json())
+            .then(data => {
+                if (data) setHomography(data);
             })
             .catch(console.error);
     }, [id]);
 
     const getStyledColors = (d: Detection): { stroke: string; fill: string } => {
-      if (d.class_name.toLowerCase() === "player" && d.object_id !== null) {
+      if (showTeams && d.class_name.toLowerCase() === "player" && d.object_id !== null) {
         const teamId = tracksMap[d.object_id];
         if (teamId && TEAM_COLORS[teamId]) return TEAM_COLORS[teamId];
       }
@@ -411,7 +527,7 @@ export default function MatchPage() {
           }
         }
 
-        if (!detections || detections.length === 0) return;
+        if (!showDetections || !detections || detections.length === 0) return;
 
         // --- draw trails (look back a small window) ---
         const byId: Record<string, { x: number; y: number; frame: number }[]> = {};
@@ -459,9 +575,9 @@ export default function MatchPage() {
                     const triangleSize = Math.min(w, h) * 0.8;  // Triangle size relative to box
                     
                     ctx.beginPath();
-                    ctx.moveTo(centerX - triangleSize/2, topY); // top left
-                    ctx.lineTo(centerX + triangleSize/2, topY); // top right
-                    ctx.lineTo(centerX, topY + triangleSize);   // bottom point
+                    ctx.moveTo(centerX - triangleSize/2, topY - triangleSize); // top left
+                    ctx.lineTo(centerX + triangleSize/2, topY - triangleSize); // top right
+                    ctx.lineTo(centerX, topY);   // bottom point
                     ctx.closePath();
                     ctx.fillStyle = colors.fill;
                     ctx.strokeStyle = colors.stroke;
@@ -505,20 +621,7 @@ export default function MatchPage() {
     };
 
 
-    const handleRunDetection = async () => {
-        if (!id) return;
-        setLoadingDetections(true);
-        try {
-            //await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analyze/detections?match_id=${id}`);
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/matches/${id}/detections`);
-            const data: Detection[] = await res.json();
-            setDetections(data);
-        } catch (e) {
-            console.error(e);
-        } finally {
-            setLoadingDetections(false);
-        }
-    };
+    // Removed handleRunDetection as it's now handled in useEffect
 
   if (!match) return <div style={{padding:20}}>Loading…</div>;
 
@@ -556,56 +659,62 @@ export default function MatchPage() {
         </div>
       </div>
       <div style={{ marginTop: 20 }}>
-        <button
-          onClick={handleRunDetection}
-          disabled={loadingDetections}
-          style={{ padding: "8px 16px", cursor: "pointer" }}
-        >
-          {loadingDetections ? "Processing…" : "Run Detection"}
-        </button>
-        {detections.length > 0 && (
-          <p style={{ marginTop: 10 }}>
-            Loaded {detections.length} detections. Scrub the video to see boxes.
+        <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input 
+              type="checkbox" 
+              checked={showDetections} 
+              onChange={(e) => {
+                setShowDetections(e.target.checked);
+                drawBoxes();
+              }}
+            />
+            Show Detections
+          </label>
+
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input 
+              type="checkbox" 
+              checked={showTeams} 
+              onChange={(e) => {
+                setShowTeams(e.target.checked);
+                drawBoxes();
+              }}
+            />
+            Show Teams
+          </label>
+
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input 
+              type="checkbox" 
+              checked={showPitch} 
+              onChange={(e) => {
+                setShowPitch(e.target.checked);
+                drawBoxes();
+              }}
+            />
+            Show Pitch Lines
+          </label>
+        </div>
+
+        {detections.length > 0 && showDetections && (
+          <p style={{ marginTop: 10, color: "#666" }}>
+            Loaded {detections.length} detections. Scrub the video to see overlays.
           </p>
         )}
-        <button
-          onClick={async () => {
-            if (!id) return;
-            try {
-              setLoadingAssign(true);
-              //const ok = await assignTeams(Number(id));
-              const ok = true;
-              if (ok) {
-                const rows = await fetchTracks(Number(id));
-                const map: Record<number, number> = {};
-                rows.forEach(t => { map[t.object_id] = t.team_id; });
-                setTracksMap(map);
-                // redraw with new colors
-                drawBoxes();
-              }
-            } finally {
-              setLoadingAssign(false);
-            }
-          }}
-          disabled={loadingAssign}
-          style={{ marginLeft: 12, padding: "8px 16px", cursor: "pointer" }}
-        >
-          {loadingAssign ? "Assigning…" : "Assign Teams"}
-        </button>
-        <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 12 }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-            <i style={{ width: 12, height: 12, background: TEAM_COLORS[1].stroke, display: "inline-block", borderRadius: 2 }} />
-            Team 1
-          </span>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-            <i style={{ width: 12, height: 12, background: TEAM_COLORS[2].stroke, display: "inline-block", borderRadius: 2 }} />
-            Team 2
-          </span>
-        </div>
-        <label style={{ marginLeft: 12 }}>
-          <input type="checkbox" checked={showPitch} onChange={(e)=>{setShowPitch(e.target.checked); drawBoxes();}} /> Show Pitch Lines
-        </label>
-        <button style={{ marginLeft: 8 }} onClick={loadHomography}>Load Homography</button>
+
+        {showTeams && (
+          <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 12 }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <i style={{ width: 12, height: 12, background: TEAM_COLORS[1].stroke, display: "inline-block", borderRadius: 2 }} />
+              Team 1
+            </span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <i style={{ width: 12, height: 12, background: TEAM_COLORS[2].stroke, display: "inline-block", borderRadius: 2 }} />
+              Team 2
+            </span>
+          </div>
+        )}
       </div>
     </main>
   );
