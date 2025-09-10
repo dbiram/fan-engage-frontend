@@ -1,5 +1,6 @@
 import { useRouter } from "next/router";
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import Analytics, { PossessionData, PossessionFrame, ControlZoneData, ControlZoneFrame, MomentumData, MomentumFrame } from "../../components/Analytics";
 
 type Match = { id:number; title:string; video_url:string };
 type Detection = {
@@ -184,9 +185,13 @@ export default function MatchPage() {
     const radarRef = useRef<HTMLCanvasElement>(null);
     const [tracksMap, setTracksMap] = useState<Record<number, number>>({});
     const [homography, setHomography] = useState<any[]>([]);
+    const [possessionData, setPossessionData] = useState<PossessionData | null>(null);
+    const [controlZoneData, setControlZoneData] = useState<ControlZoneData | null>(null);
+    const [momentumData, setMomentumData] = useState<MomentumData | null>(null);
     const [showPitch, setShowPitch] = useState(false);
     const [showDetections, setShowDetections] = useState(true);
     const [showTeams, setShowTeams] = useState(true);
+    const [currentFrame, setCurrentFrame] = useState(0);
 
     const drawRadar = (t: number, seg: any) => {
       const canvas = radarRef.current;
@@ -385,7 +390,32 @@ export default function MatchPage() {
                 if (data) setHomography(data);
             })
             .catch(console.error);
+
+        // Fetch possession analytics
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/${id}/possession`)
+            .then(r => r.json())
+            .then((data: PossessionData) => {
+                setPossessionData(data);
+            })
+            .catch(console.error);
+
+        // Fetch control zone analytics
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/${id}/control_zones`)
+            .then(r => r.json())
+            .then((data: ControlZoneData) => {
+                setControlZoneData(data);
+            })
+            .catch(console.error);
+
+        // Fetch momentum analytics
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/${id}/momentum`)
+            .then(r => r.json())
+            .then((data: MomentumData) => {
+                setMomentumData(data);
+            })
+            .catch(console.error);
     }, [id]);
+
 
     const getStyledColors = (d: Detection): { stroke: string; fill: string } => {
       if (showTeams && d.class_name.toLowerCase() === "player" && d.object_id !== null) {
@@ -425,6 +455,9 @@ export default function MatchPage() {
         
         // Update radar view
         drawRadar(t, currentSeg);
+
+        // Update current frame for analytics
+        setCurrentFrame(t);
 
         // === pitch overlay (before boxes), if enabled ===
         if (showPitch && Array.isArray(homography) && homography.length > 0) {
@@ -628,7 +661,9 @@ export default function MatchPage() {
   return (
     <main style={{padding:20}}>
       <h2>{match.title}</h2>
-      <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
+      
+      {/* First Row: Video and Radar */}
+      <div style={{ display: "flex", gap: 20, alignItems: "flex-start", marginBottom: 20 }}>
         <div style={{ position: "relative", width: 960, maxWidth: "100%" }}>
           <video
             ref={videoRef}
@@ -658,63 +693,76 @@ export default function MatchPage() {
           />
         </div>
       </div>
-      <div style={{ marginTop: 20 }}>
-        <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-            <input 
-              type="checkbox" 
-              checked={showDetections} 
-              onChange={(e) => {
-                setShowDetections(e.target.checked);
-                drawBoxes();
-              }}
-            />
-            Show Detections
-          </label>
 
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-            <input 
-              type="checkbox" 
-              checked={showTeams} 
-              onChange={(e) => {
-                setShowTeams(e.target.checked);
-                drawBoxes();
-              }}
-            />
-            Show Teams
-          </label>
+      {/* Second Row: Controls and Analytics */}
+      <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
+        {/* Controls Section */}
+        <div style={{ width: 960, maxWidth: "100%" }}>
+          <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input 
+                type="checkbox" 
+                checked={showDetections} 
+                onChange={(e) => {
+                  setShowDetections(e.target.checked);
+                  drawBoxes();
+                }}
+              />
+              Show Detections
+            </label>
 
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-            <input 
-              type="checkbox" 
-              checked={showPitch} 
-              onChange={(e) => {
-                setShowPitch(e.target.checked);
-                drawBoxes();
-              }}
-            />
-            Show Pitch Lines
-          </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input 
+                type="checkbox" 
+                checked={showTeams} 
+                onChange={(e) => {
+                  setShowTeams(e.target.checked);
+                  drawBoxes();
+                }}
+              />
+              Show Teams
+            </label>
+
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input 
+                type="checkbox" 
+                checked={showPitch} 
+                onChange={(e) => {
+                  setShowPitch(e.target.checked);
+                  drawBoxes();
+                }}
+              />
+              Show Pitch Lines
+            </label>
+          </div>
+
+          {detections.length > 0 && showDetections && (
+            <p style={{ marginTop: 10, color: "#666" }}>
+              Loaded {detections.length} detections. Scrub the video to see overlays.
+            </p>
+          )}
+
+          {showTeams && (
+            <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 12 }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <i style={{ width: 12, height: 12, background: TEAM_COLORS[1].stroke, display: "inline-block", borderRadius: 2 }} />
+                Team 1
+              </span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <i style={{ width: 12, height: 12, background: TEAM_COLORS[2].stroke, display: "inline-block", borderRadius: 2 }} />
+                Team 2
+              </span>
+            </div>
+          )}
         </div>
 
-        {detections.length > 0 && showDetections && (
-          <p style={{ marginTop: 10, color: "#666" }}>
-            Loaded {detections.length} detections. Scrub the video to see overlays.
-          </p>
-        )}
-
-        {showTeams && (
-          <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 12 }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <i style={{ width: 12, height: 12, background: TEAM_COLORS[1].stroke, display: "inline-block", borderRadius: 2 }} />
-              Team 1
-            </span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <i style={{ width: 12, height: 12, background: TEAM_COLORS[2].stroke, display: "inline-block", borderRadius: 2 }} />
-              Team 2
-            </span>
-          </div>
-        )}
+        {/* Analytics Section */}
+        <Analytics 
+          possessionData={possessionData} 
+          controlZoneData={controlZoneData}
+          momentumData={momentumData}
+          currentFrame={currentFrame} 
+        />
       </div>
     </main>
   );

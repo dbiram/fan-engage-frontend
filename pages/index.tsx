@@ -48,6 +48,15 @@ export default function Home() {
         method: 'POST'
       });
       
+      // Run analytics
+      setCurrentStep("Running analytics...");
+      await Promise.all([
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/positions?match_id=${match.id}`, { method: 'POST' }),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/possession?match_id=${match.id}&max_dist_m=4`, { method: 'POST' }),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/control_zones?match_id=${match.id}&stride=5`, { method: 'POST' }),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/momentum?match_id=${match.id}&stride=5`, { method: 'POST' })
+      ]);
+      
       setCurrentStep("Processing complete!");
       
       // Refresh matches list
