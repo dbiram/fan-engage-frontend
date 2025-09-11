@@ -1,12 +1,34 @@
 import React, { useEffect, useState } from "react";
 
 type Match = { id:number; title:string; video_url:string };
+const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+
+type SavedJob = { job_id: string; match_id: number; title: string };
+
+const JOBS_KEY = "fe:pending-jobs";
+
+function loadJobs(): SavedJob[] {
+  try { return JSON.parse(localStorage.getItem(JOBS_KEY) || "[]"); } catch { return []; }
+}
+function saveJobs(jobs: SavedJob[]) {
+  localStorage.setItem(JOBS_KEY, JSON.stringify(jobs));
+}
+function upsertJob(j: SavedJob) {
+  const jobs = loadJobs().filter(x => x.job_id !== j.job_id);
+  jobs.push(j);
+  saveJobs(jobs);
+}
+function removeJob(job_id: string) {
+  saveJobs(loadJobs().filter(j => j.job_id !== job_id));
+}
+
 
 export default function Home() {
   const [matches, setMatches] = useState<Match[]>([]);
   const [uploading, setUploading] = useState(false);
   const [currentStep, setCurrentStep] = useState<string>("");
   const [uploadError, setUploadError] = useState<string>("");
+  const [activeJob, setActiveJob] = useState<SavedJob | null>(null);
 
   useEffect(() => {
     fetch(process.env.NEXT_PUBLIC_API_BASE + "/matches")
@@ -14,6 +36,62 @@ export default function Home() {
       .then(setMatches)
       .catch(console.error);
   }, []);
+  useEffect(() => {
+    const pending = loadJobs();
+    setActiveJob(pending[pending.length - 1] || null);
+  }, []);
+  async function pollJob(
+    job: SavedJob,
+    setCurrentStep: (s: string) => void,
+    onFinished: (job: SavedJob) => Promise<void>
+  ) {
+    let done = false;
+    while (!done) {
+      const s = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/jobs/${job.job_id}`).then(r => r.json());
+      const pct = typeof s.progress === "number" ? `${s.progress}%` : "0%";
+      const note = s.note || s.status || "";
+      setCurrentStep(`${pct} — ${note}`);
+
+      if (s.status === "finished") {
+        setCurrentStep("Running analytics…");
+        await onFinished(job);
+        setCurrentStep("Processing complete!");
+        removeJob(job.job_id);
+        done = true;
+      } else if (["failed","stopped","canceled"].includes(s.status)) {
+        setCurrentStep("0% — failed");
+        removeJob(job.job_id);
+        throw new Error(s.exc || "Job failed");
+      } else {
+        await sleep(1500);
+      }
+    }
+  }
+
+  useEffect(() => {
+    const pending = loadJobs();
+    if (!pending.length) return;
+
+    // Show the latest job’s status in the banner
+    const last = pending[pending.length - 1];
+
+    pollJob(last, setCurrentStep, async (job) => {
+      // run your fast analytics after the pipeline finishes
+      await Promise.all([
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/positions?match_id=${job.match_id}`),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/possession?match_id=${job.match_id}&max_dist_m=4`),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/control_zones?match_id=${job.match_id}&stride=5`),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/momentum?match_id=${job.match_id}&stride=5`),
+      ]);
+
+      // refresh matches list
+      const refreshed = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/matches`).then(r => r.json());
+      setMatches(refreshed);
+    }).catch((e) => {
+      console.error(e);
+    });
+  }, []);
+
 
   const handleUpload = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -33,39 +111,30 @@ export default function Home() {
       
       if (!uploadRes.ok) throw new Error("Failed to upload video");
       const match: Match = await uploadRes.json();
-      
-      // Run detections
-      setCurrentStep("Running player detections...");
-      await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analyze/detections?match_id=${match.id}`);
-      
-      // Assign teams
-      setCurrentStep("Assigning teams...");
-      await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/teams/assign?match_id=${match.id}`, { method: "POST" });
-      
-      // Calculate homography
-      setCurrentStep("Calculating pitch homography...");
-      await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/homography/estimate?match_id=${match.id}&segment_frames=25&step=5`, {
-        method: 'POST'
+
+      // Enqueue pipeline job
+      setCurrentStep("Queued…");
+      const jobRes = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/jobs/pipeline?match_id=${match.id}&conf_thres=0.1`, { method: "POST" });
+      if (!jobRes.ok) throw new Error("Failed to enqueue processing job");
+      const { job_id } = await jobRes.json();
+
+      const title = (formData.get("title") as string) || `Match ${match.id}`;
+      upsertJob({ job_id, match_id: match.id, title });
+
+      // Poll job status
+      await pollJob({ job_id, match_id: match.id, title }, setCurrentStep, async (job) => {
+        // run analytics (fast)
+        await Promise.all([
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/positions?match_id=${job.match_id}`),
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/possession?match_id=${job.match_id}&max_dist_m=4`),
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/control_zones?match_id=${job.match_id}&stride=5`),
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/momentum?match_id=${job.match_id}&stride=5`),
+        ]);
+
+        // refresh matches list
+        const refreshed = await fetch(`${process.env.NEXT_PUBLIC_API_BASE}/matches`).then(r => r.json());
+        setMatches(refreshed);
       });
-      
-      // Run analytics
-      setCurrentStep("Running analytics...");
-      await Promise.all([
-        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/positions?match_id=${match.id}`, { method: 'POST' }),
-        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/possession?match_id=${match.id}&max_dist_m=4`, { method: 'POST' }),
-        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/control_zones?match_id=${match.id}&stride=5`, { method: 'POST' }),
-        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/momentum?match_id=${match.id}&stride=5`, { method: 'POST' })
-      ]);
-      
-      setCurrentStep("Processing complete!");
-      
-      // Refresh matches list
-      const matchesRes = await fetch(process.env.NEXT_PUBLIC_API_BASE + "/matches");
-      const newMatches = await matchesRes.json();
-      setMatches(newMatches);
-      
-      // Reset form
-      form.reset();
       
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : "An error occurred");
@@ -149,6 +218,11 @@ export default function Home() {
           {uploadError && (
             <div style={{ marginTop: "1rem", padding: "1rem", backgroundColor: "#fee2e2", borderRadius: "4px", color: "#dc2626" }}>
               <p>{uploadError}</p>
+            </div>
+          )}
+          {activeJob && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "#555" }}>
+              Processing: <strong>{activeJob.title}</strong> (match #{activeJob.match_id})
             </div>
           )}
         </div>
