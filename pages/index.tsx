@@ -78,10 +78,10 @@ export default function Home() {
     pollJob(last, setCurrentStep, async (job) => {
       // run your fast analytics after the pipeline finishes
       await Promise.all([
-        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/positions?match_id=${job.match_id}`),
-        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/possession?match_id=${job.match_id}&max_dist_m=4`),
-        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/control_zones?match_id=${job.match_id}&stride=5`),
-        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/momentum?match_id=${job.match_id}&stride=5`),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/positions?match_id=${job.match_id}`, { method: 'POST' }),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/possession?match_id=${job.match_id}&max_dist_m=4`, { method: 'POST' }),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/control_zones?match_id=${job.match_id}&stride=5`, { method: 'POST' }),
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/momentum?match_id=${job.match_id}&stride=5`, { method: 'POST' }),
       ]);
 
       // refresh matches list
@@ -125,10 +125,10 @@ export default function Home() {
       await pollJob({ job_id, match_id: match.id, title }, setCurrentStep, async (job) => {
         // run analytics (fast)
         await Promise.all([
-          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/positions?match_id=${job.match_id}`),
-          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/possession?match_id=${job.match_id}&max_dist_m=4`),
-          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/control_zones?match_id=${job.match_id}&stride=5`),
-          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/momentum?match_id=${job.match_id}&stride=5`),
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/positions?match_id=${job.match_id}`, { method: 'POST' }),
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/possession?match_id=${job.match_id}&max_dist_m=4`, { method: 'POST' }),
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/control_zones?match_id=${job.match_id}&stride=5`, { method: 'POST' }),
+          fetch(`${process.env.NEXT_PUBLIC_API_BASE}/analytics/momentum?match_id=${job.match_id}&stride=5`, { method: 'POST' }),
         ]);
 
         // refresh matches list
